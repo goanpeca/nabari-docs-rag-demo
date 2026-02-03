@@ -1,0 +1,52 @@
+repos:
+  # Ruff - Fast linting and formatting (replaces black, isort, flake8)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: ["--fix"]
+      # Run the formatter
+      - id: ruff-format
+
+  # Type checking with mypy
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - types-PyYAML
+          - types-requests
+        args: ["--config-file=pyproject.toml"]
+        exclude: ^(tests/|test_api\.py|clean_all\.py|check_account\.py|debug_db\.py)
+
+  # Docstring style enforcement (numpy style)
+  - repo: https://github.com/PyCQA/pydocstyle
+    rev: 6.3.0
+    hooks:
+      - id: pydocstyle
+        args: ["--convention=numpy"]
+        additional_dependencies: ["tomli"]
+
+  # Basic file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(node_modules/|\.cache/)
+      - id: end-of-file-fixer
+        exclude: ^(node_modules/|\.cache/)
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+        exclude: ^chroma_db/
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # Python security check
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.6
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml"]
+        additional_dependencies: ["bandit[toml]"]

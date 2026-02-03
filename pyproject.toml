@@ -1,0 +1,67 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    ".git",
+    ".venv",
+    ".env",
+    "chroma_db",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+]
+ignore = ["E203"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_unimported = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+check_untyped_defs = true
+strict_equality = true
+exclude = ["tests/", "clean_all.py", "test_api.py"]
+
+[[tool.mypy.overrides]]
+module = [
+    "chromadb.*",
+    "anthropic.*",
+    "langchain.*",
+    "streamlit.*",
+    "dotenv.*",
+    "pytest.*",
+]
+ignore_missing_imports = true
+
+[tool.pydocstyle]
+convention = "numpy"
+add_ignore = ["D100"]  # Ignore missing module docstrings
+match = "(?!test_|__init__).*\\.py"  # Skip test files and __init__.py
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+
+[tool.bandit]
+exclude_dirs = ["tests", "chroma_db"]
+skips = ["B101"]  # Skip assert_used warning in tests
