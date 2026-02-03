@@ -34,38 +34,38 @@ def extract_homepage_content() -> str:
     content.append("# Nebari - Your Open Source Data Science Platform\n")
     content.append("Built for scale, designed for collaboration.\n")
 
-    # Why choose Nebari section
-    content.append("\n## Why Choose Nebari?\n")
+    # Why choose Nebari section - keep as single chunk
+    content.append("\n## Why Choose Nebari?\n\n")
     content.append(
-        "\n### GitOps Approach\n"
+        "**GitOps Approach** - "
         "Integrated DevOps and security best practices for a robust deployment "
-        "and better infrastructure management.\n"
+        "and better infrastructure management.\n\n"
     )
     content.append(
-        "\n### Opinionated\n"
+        "**Opinionated** - "
         "Designed with integrations and configurations selected from real-world "
         "experience, so that you can use it out-of-the-box for a variety of data "
-        "science workloads.\n"
+        "science workloads.\n\n"
     )
     content.append(
-        "\n### Rooted in Open Source\n"
+        "**Rooted in Open Source** - "
         "Developed with community in mind and under a BSD-3 license, we strive to "
-        "contribute back to the upstream OSS projects wherever possible.\n"
+        "contribute back to the upstream OSS projects wherever possible.\n\n"
     )
     content.append(
-        "\n### Collaboration-First\n"
+        "**Collaboration-First** - "
         "Large teams can share work and iterate quickly with reproducible "
         "environments. Administrators can manage team resources effectively, "
-        "all from the same platform.\n"
+        "all from the same platform.\n\n"
     )
     content.append(
-        "\n### Dask Powered\n"
+        "**Dask Powered** - "
         "Nebari ships with Dask so you can scale your work to terabytes of data, "
         "leverage cloud instances with GPUs, and take advantage of adaptive scaling "
-        "for managing costs.\n"
+        "for managing costs.\n\n"
     )
     content.append(
-        "\n### Your Favorite Tools\n"
+        "**Your Favorite Tools** - "
         "Built with open source infrastructure and tools to give you complete "
         "flexibility over your deployment and fit your team's specific needs.\n"
     )

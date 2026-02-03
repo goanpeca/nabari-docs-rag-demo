@@ -3,12 +3,19 @@
 A RAG-powered chatbot for answering questions about Nebari documentation.
 """
 
+import hashlib
 import os
 import re
+import zipfile
+from datetime import datetime
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
+import httpx  # type: ignore[import-not-found]
 import streamlit as st
 from dotenv import load_dotenv
+from extra_streamlit_components import CookieManager  # type: ignore[import-not-found]
 
 from agent import NebariAgent
 
@@ -23,9 +30,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Initialize cookie manager at module level with unique key
+cookie_manager = CookieManager(key="nebari_cookie_manager")
+
 
 def check_password() -> bool:
     """Check login credentials with username and password.
+
+    Uses cookies to persist authentication for 7 days.
 
     Returns
     -------
@@ -67,6 +79,27 @@ def check_password() -> bool:
     # Initialize session state for authentication
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+
+    # Check cookie for existing auth
+    cookies = cookie_manager.get_all()
+
+    # Debug: Show what cookies we got (remove this after testing)
+    if cookies:
+        print(f"DEBUG: Retrieved cookies: {list(cookies.keys())}")
+        if "nebari_auth" in cookies:
+            print(f"DEBUG: Found nebari_auth cookie: {cookies['nebari_auth'][:20]}...")
+    else:
+        print("DEBUG: No cookies retrieved (None or empty)")
+
+    auth_cookie = cookies.get("nebari_auth") if cookies else None
+    if auth_cookie and not st.session_state.authenticated:
+        # Verify cookie hash
+        expected_hash = hashlib.sha256(
+            f"{correct_username}:{correct_password}".encode()
+        ).hexdigest()
+        if auth_cookie == expected_hash:
+            st.session_state.authenticated = True
+            return True
 
     # If already authenticated, return True
     if st.session_state.authenticated:
@@ -110,6 +143,10 @@ def check_password() -> bool:
             if submit:
                 if username == correct_username and password == correct_password:
                     st.session_state.authenticated = True
+                    # Set cookie for 7 days (max_age in seconds)
+                    auth_hash = hashlib.sha256(f"{username}:{password}".encode()).hexdigest()
+                    print(f"DEBUG: Setting cookie with hash: {auth_hash[:20]}...")
+                    cookie_manager.set("nebari_auth", auth_hash, max_age=7 * 24 * 60 * 60)
                     st.success(" Login successful!")
                     st.rerun()
                 else:
@@ -258,11 +295,156 @@ def display_sources(sources: list[dict[str, Any]]) -> None:
             )
 
 
+def export_conversation_to_markdown() -> str:
+    """Export conversation history to Markdown format.
+
+    Returns
+    -------
+    str
+        Formatted Markdown string of the conversation
+    """
+    lines = ["# Nebari Documentation Chat Export\n"]
+    lines.append(f"*Exported: {st.session_state.get('export_time', 'Unknown')}*\n")
+    lines.append("---\n\n")
+
+    for i, msg in enumerate(st.session_state.messages):
+        if msg["role"] == "user":
+            lines.append(f"## Question {i//2 + 1}\n")
+            lines.append(f"{msg['content']}\n\n")
+        else:
+            lines.append("### Answer\n")
+            lines.append(f"{msg['content']}\n\n")
+
+            if msg.get("sources"):
+                lines.append("**Sources:**\n")
+                for source in msg["sources"]:
+                    title = source.get("title", "Unknown")
+                    category = source.get("category", "unknown")
+                    lines.append(f"- {title} ({category})\n")
+                lines.append("\n")
+
+            if msg.get("metrics"):
+                metrics = msg["metrics"]
+                lines.append(f"*Response time: {metrics['total_time']:.2f}s | ")
+                lines.append(f"Tokens: {metrics['tokens']['total']} | ")
+                lines.append(f"Cost: ${metrics['cost']:.4f}*\n\n")
+
+            lines.append("---\n\n")
+
+    return "".join(lines)
+
+
+def export_conversation_with_images() -> bytes:
+    """Export conversation as a zip file with markdown and images.
+
+    Downloads all images referenced in the conversation and packages them
+    with the chat markdown in a folder structure.
+
+    Returns
+    -------
+    bytes
+        Zip file contents as bytes
+    """
+    # Extract all image URLs from messages
+    image_pattern = r"!\[([^\]]*)\]\((https://[^\)]+\.(?:png|jpg|jpeg|gif|svg))\)"
+    image_urls = set()
+
+    for msg in st.session_state.messages:
+        if msg["role"] == "assistant":
+            images = re.findall(image_pattern, msg["content"])
+            for _, url in images:
+                image_urls.add(url)
+
+    # Create markdown content with local image paths
+    lines = ["# Nebari Documentation Chat Export\n"]
+    lines.append(f"*Exported: {st.session_state.get('export_time', 'Unknown')}*\n")
+    lines.append("---\n\n")
+
+    # Map URLs to local filenames
+    url_to_filename: dict[str, str] = {}
+    for idx, url in enumerate(sorted(image_urls)):
+        ext = Path(url).suffix or ".png"
+        filename = f"image_{idx + 1}{ext}"
+        url_to_filename[url] = filename
+
+    # Build markdown with local image references
+    for i, msg in enumerate(st.session_state.messages):
+        if msg["role"] == "user":
+            lines.append(f"## Question {i//2 + 1}\n")
+            lines.append(f"{msg['content']}\n\n")
+        else:
+            lines.append("### Answer\n")
+            # Replace image URLs with local paths
+            content = msg["content"]
+            for url, filename in url_to_filename.items():
+                content = content.replace(url, f"images/{filename}")
+            lines.append(f"{content}\n\n")
+
+            if msg.get("sources"):
+                lines.append("**Sources:**\n")
+                for source in msg["sources"]:
+                    title = source.get("title", "Unknown")
+                    category = source.get("category", "unknown")
+                    lines.append(f"- {title} ({category})\n")
+                lines.append("\n")
+
+            if msg.get("metrics"):
+                metrics = msg["metrics"]
+                lines.append(f"*Response time: {metrics['total_time']:.2f}s | ")
+                lines.append(f"Tokens: {metrics['tokens']['total']} | ")
+                lines.append(f"Cost: ${metrics['cost']:.4f}*\n\n")
+
+            lines.append("---\n\n")
+
+    markdown_content = "".join(lines)
+
+    # Create zip file in memory
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        # Add markdown file
+        zip_file.writestr("chat.md", markdown_content)
+
+        # Download and add images
+        if image_urls:
+            with httpx.Client(timeout=30.0) as client:
+                for url, filename in url_to_filename.items():
+                    try:
+                        response = client.get(url)
+                        response.raise_for_status()
+                        zip_file.writestr(f"images/{filename}", response.content)
+                    except Exception as e:
+                        # Skip images that fail to download
+                        print(f"Failed to download {url}: {e}")
+
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+
 def main() -> None:
     """Run the main Streamlit application."""
     # Check authentication first
     if not check_password():
         st.stop()
+
+    # Initialize session state FIRST
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    if "query_history" not in st.session_state:
+        st.session_state.query_history = []
+
+    if "feedback" not in st.session_state:
+        st.session_state.feedback = {}
+
+    if "total_tokens" not in st.session_state:
+        st.session_state.total_tokens = 0
+
+    if "total_cost" not in st.session_state:
+        st.session_state.total_cost = 0.0
+
+    if "agent" not in st.session_state:
+        with st.spinner("Loading agent..."):
+            st.session_state.agent = load_agent()
 
     # Title with Nebari logo
     col1, col2 = st.columns([1, 8])
@@ -312,6 +494,54 @@ def main() -> None:
             help="Narrow search to specific documentation category",
         )
         category_filter = None if category_filter_select == "All" else category_filter_select
+
+        st.markdown("---")
+
+        # Session stats
+        st.title("📊 Session Stats")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Tokens", f"{st.session_state.total_tokens:,}")
+            helpful_count = sum(1 for f in st.session_state.feedback.values() if f == "helpful")
+            st.metric("👍 Helpful", helpful_count)
+        with col2:
+            st.metric("Total Cost", f"${st.session_state.total_cost:.4f}")
+            not_helpful_count = sum(
+                1 for f in st.session_state.feedback.values() if f == "not_helpful"
+            )
+            st.metric("👎 Not Helpful", not_helpful_count)
+
+        # Export conversation
+        if st.session_state.messages:
+            st.session_state.export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Create two columns for export buttons
+            export_col1, export_col2 = st.columns(2)
+
+            with export_col1:
+                # Simple markdown export
+                markdown_content = export_conversation_to_markdown()
+                st.download_button(
+                    label="📄 Markdown",
+                    data=markdown_content,
+                    file_name=f"nebari_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                    mime="text/markdown",
+                    width="stretch",
+                    help="Download as markdown file only",
+                )
+
+            with export_col2:
+                # Zip export with images
+                with st.spinner("Preparing zip..."):
+                    zip_content = export_conversation_with_images()
+                st.download_button(
+                    label="📦 Zip+Images",
+                    data=zip_content,
+                    file_name=f"nebari_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    width="stretch",
+                    help="Download zip with markdown and images",
+                )
 
         st.markdown("---")
 
@@ -373,6 +603,9 @@ def main() -> None:
         # Logout button
         st.markdown("---")
         if st.button("Logout", width="stretch"):
+            # Clear cookie
+            cookie_manager.delete("nebari_auth")
+            # Clear session
             st.session_state.authenticated = False
             st.session_state.messages = []
             st.session_state.query_history = []
@@ -380,19 +613,8 @@ def main() -> None:
                 del st.session_state.agent
             st.rerun()
 
-    # Initialize session state
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    if "query_history" not in st.session_state:
-        st.session_state.query_history = []
-
-    if "agent" not in st.session_state:
-        with st.spinner("Loading agent..."):
-            st.session_state.agent = load_agent()
-
     # Display chat history
-    for message in st.session_state.messages:
+    for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             # Display text
             st.markdown(message["content"])
@@ -409,6 +631,56 @@ def main() -> None:
                             caption=alt_text or "Nebari Documentation Image",
                             width="stretch",
                         )
+
+                # Display metrics and feedback for assistant messages
+                if message.get("metrics"):
+                    metrics = message["metrics"]
+                    col1, col2, col3, col4 = st.columns([2, 2, 2, 4])
+                    with col1:
+                        st.caption(f"⚡ {metrics['total_time']:.2f}s")
+                    with col2:
+                        st.caption(f"🔢 {metrics['tokens']['total']} tokens")
+                    with col3:
+                        st.caption(f"💰 ${metrics['cost']:.4f}")
+                    with col4:
+                        # Feedback buttons
+                        feedback_col1, feedback_col2 = st.columns(2)
+                        with feedback_col1:
+                            if st.button("👍 Helpful", key=f"helpful_{idx}"):
+                                st.session_state.feedback[idx] = "helpful"
+                                st.rerun()
+                        with feedback_col2:
+                            if st.button("👎 Not Helpful", key=f"not_helpful_{idx}"):
+                                st.session_state.feedback[idx] = "not_helpful"
+                                st.rerun()
+
+                        # Show current feedback
+                        if idx in st.session_state.feedback:
+                            if st.session_state.feedback[idx] == "helpful":
+                                st.success("✓ Marked as helpful")
+                            else:
+                                st.warning("✓ Marked as not helpful")
+
+                # Display retrieval quality visualization
+                if message.get("retrieval_scores"):
+                    with st.expander("🎯 Retrieval Quality", expanded=False):
+                        st.caption("Semantic similarity scores (lower = better match)")
+                        for i, score_info in enumerate(message["retrieval_scores"]):
+                            # Color code by relevance
+                            if score_info["distance"] < 0.4:
+                                icon = "🟢"
+                                quality = "High"
+                            elif score_info["distance"] < 0.7:
+                                icon = "🟡"
+                                quality = "Medium"
+                            else:
+                                icon = "⚪"
+                                quality = "Low"
+
+                            st.markdown(
+                                f"{icon} **{score_info['title']}** - "
+                                f"Distance: {score_info['distance']:.3f} ({quality})"
+                            )
 
             if message.get("sources"):
                 display_sources(message["sources"])
@@ -462,18 +734,80 @@ def main() -> None:
                         width="stretch",
                     )
 
-            # Display sources
+            # Display metrics
+            if result.get("tokens"):
+                metrics = {
+                    "total_time": result.get("total_time", 0),
+                    "tokens": result["tokens"],
+                    "cost": result.get("cost", 0),
+                }
+
+                # Update session totals
+                st.session_state.total_tokens += metrics["tokens"]["total"]
+                st.session_state.total_cost += metrics["cost"]
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.caption(f"⚡ {metrics['total_time']:.2f}s")
+                    st.caption(f"  ├─ Retrieval: {result.get('retrieval_time', 0):.2f}s")
+                    st.caption(f"  └─ LLM: {result.get('llm_time', 0):.2f}s")
+                with col2:
+                    st.caption(f"🔢 {metrics['tokens']['total']} tokens")
+                    st.caption(f"  ├─ Input: {metrics['tokens']['input']}")
+                    st.caption(f"  └─ Output: {metrics['tokens']['output']}")
+                with col3:
+                    st.caption(f"💰 ${metrics['cost']:.4f}")
+
+            # Display retrieval quality
             if result.get("sources"):
+                retrieval_scores = [
+                    {
+                        "title": s.get("title", "Unknown"),
+                        "distance": 1 - s.get("relevance", 0),  # Convert relevance to distance
+                    }
+                    for s in result["sources"]
+                ]
+
+                with st.expander("🎯 Retrieval Quality", expanded=False):
+                    st.caption("Semantic similarity scores (lower = better match)")
+                    for score_info in retrieval_scores:
+                        # Color code by relevance
+                        if score_info["distance"] < 0.4:
+                            icon = "🟢"
+                            quality = "High"
+                        elif score_info["distance"] < 0.7:
+                            icon = "🟡"
+                            quality = "Medium"
+                        else:
+                            icon = "⚪"
+                            quality = "Low"
+
+                        st.markdown(
+                            f"{icon} **{score_info['title']}** - "
+                            f"Distance: {score_info['distance']:.3f} ({quality})"
+                        )
+
                 display_sources(result["sources"])
 
             # Add to chat history
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": result["answer"],
-                    "sources": result.get("sources", []),
+            message_data = {
+                "role": "assistant",
+                "content": result["answer"],
+                "sources": result.get("sources", []),
+            }
+
+            if result.get("tokens"):
+                message_data["metrics"] = {
+                    "total_time": result.get("total_time", 0),
+                    "tokens": result["tokens"],
+                    "cost": result.get("cost", 0),
                 }
-            )
+                message_data["retrieval_scores"] = retrieval_scores
+
+            st.session_state.messages.append(message_data)
+
+            # Force rerun to update sidebar stats immediately
+            st.rerun()
 
 
 if __name__ == "__main__":

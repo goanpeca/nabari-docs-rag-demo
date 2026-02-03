@@ -5,6 +5,7 @@ and answer generation using Claude.
 """
 
 import os
+import time
 from typing import Any
 
 import chromadb
@@ -88,6 +89,11 @@ class NebariAgent:
         queries: list[str] = [query]
         query_lower = query.lower()
 
+        # Handle "why" questions about benefits and value proposition
+        if any(word in query_lower for word in ["why", "should i use", "benefits", "advantages"]):
+            queries.append("why choose nebari benefits features advantages")
+            queries.append("gitops collaboration dask open source platform")
+
         if any(word in query_lower for word in ["show", "see", "view", "display", "what"]):
             for remove_word in [
                 "show me",
@@ -153,6 +159,13 @@ class NebariAgent:
         if category_filter:
             where = {"category": category_filter}
 
+        # Detect if this is a "why/benefits" question to boost homepage content
+        query_lower = query.lower()
+        is_why_question = any(
+            word in query_lower
+            for word in ["why", "should i use", "benefits", "advantages", "choose"]
+        )
+
         queries = self.expand_query(query) if use_query_expansion else [query]
         all_results: dict[str, dict[str, Any]] = {}
 
@@ -168,6 +181,10 @@ class NebariAgent:
                 for i, doc in enumerate(results["documents"][0]):
                     metadata = results["metadatas"][0][i]
                     distance = results["distances"][0][i] if "distances" in results else None
+
+                    # Boost homepage content for "why" questions
+                    if is_why_question and metadata.get("source") == "website":
+                        distance = distance * 0.6 if distance is not None else 0.3
 
                     chunk_key = f"{metadata.get('file_path', '')}:{metadata.get('heading', '')}"
 
@@ -229,14 +246,28 @@ class NebariAgent:
         prompt = SYSTEM_PROMPT.format(context=context_str, question=query)
 
         try:
+            # Time the LLM call
+            llm_start = time.time()
             message = self.anthropic.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=max_tokens,
                 temperature=temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
+            llm_time = time.time() - llm_start
 
             answer = message.content[0].text
+
+            # Extract token usage
+            input_tokens = message.usage.input_tokens
+            output_tokens = message.usage.output_tokens
+            total_tokens = input_tokens + output_tokens
+
+            # Calculate cost (Claude Sonnet 4 pricing as of Feb 2025)
+            # Input: $3.00 per million tokens, Output: $15.00 per million tokens
+            input_cost = (input_tokens / 1_000_000) * 3.00
+            output_cost = (output_tokens / 1_000_000) * 15.00
+            total_cost = input_cost + output_cost
 
             sources: list[dict[str, Any]] = []
             for chunk in context:
@@ -255,6 +286,13 @@ class NebariAgent:
                 "sources": sources,
                 "query": query,
                 "model": "claude-sonnet-4-20250514",
+                "tokens": {
+                    "input": input_tokens,
+                    "output": output_tokens,
+                    "total": total_tokens,
+                },
+                "cost": total_cost,
+                "llm_time": llm_time,
             }
 
         except Exception as e:
@@ -290,7 +328,13 @@ class NebariAgent:
         dict[str, Any]
             Dictionary with answer and metadata
         """
+        # Time the entire operation
+        total_start = time.time()
+
+        # Time retrieval
+        retrieval_start = time.time()
         context = self.retrieve_context(query=query, top_k=top_k, category_filter=category_filter)
+        retrieval_time = time.time() - retrieval_start
 
         if not context:
             return {
@@ -303,6 +347,11 @@ class NebariAgent:
             }
 
         result = self.generate_answer(query=query, context=context, temperature=temperature)
+
+        # Add timing information
+        total_time = time.time() - total_start
+        result["retrieval_time"] = retrieval_time
+        result["total_time"] = total_time
 
         self.conversation_history.append({"query": query, "answer": result["answer"]})
 
