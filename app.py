@@ -6,6 +6,7 @@ A RAG-powered chatbot for answering questions about Nebari documentation.
 import hashlib
 import os
 import re
+import uuid
 import zipfile
 from datetime import datetime
 from io import BytesIO
@@ -98,18 +99,31 @@ def check_password() -> bool:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
 
+    # Initialize session ID for cookie invalidation
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+
     # Check cookie for existing auth (only works on HTTPS/deployed, not localhost)
     if cookie_manager is not None:
         cookies = cookie_manager.get_all()
         auth_cookie = cookies.get("nebari_auth") if cookies else None
-        if auth_cookie and not st.session_state.authenticated:
-            # Verify cookie hash
-            expected_hash = hashlib.sha256(
-                f"{correct_username}:{correct_password}".encode()
-            ).hexdigest()
-            if auth_cookie == expected_hash:
-                st.session_state.authenticated = True
-                return True
+        # Cookie format: "hash:session_id"
+        if auth_cookie and auth_cookie.strip() and not st.session_state.authenticated:
+            try:
+                cookie_hash, cookie_session_id = auth_cookie.split(":", 1)
+                # Verify both hash and session ID match
+                expected_hash = hashlib.sha256(
+                    f"{correct_username}:{correct_password}".encode()
+                ).hexdigest()
+                if (
+                    cookie_hash == expected_hash
+                    and cookie_session_id == st.session_state.session_id
+                ):
+                    st.session_state.authenticated = True
+                    return True
+            except ValueError:
+                # Invalid cookie format, ignore
+                pass
 
     # If already authenticated, return True
     if st.session_state.authenticated:
@@ -153,10 +167,12 @@ def check_password() -> bool:
             if submit:
                 if username == correct_username and password == correct_password:
                     st.session_state.authenticated = True
-                    # Set cookie for 7 days (max_age in seconds, requires HTTPS)
+                    # Set cookie with hash and session ID for 7 days (requires HTTPS)
                     if cookie_manager is not None:
                         auth_hash = hashlib.sha256(f"{username}:{password}".encode()).hexdigest()
-                        cookie_manager.set("nebari_auth", auth_hash, max_age=7 * 24 * 60 * 60)
+                        # Format: "hash:session_id"
+                        cookie_value = f"{auth_hash}:{st.session_state.session_id}"
+                        cookie_manager.set("nebari_auth", cookie_value, max_age=7 * 24 * 60 * 60)
                     st.success(" Login successful!")
                     st.rerun()
                 else:
@@ -643,7 +659,7 @@ def main() -> None:
         Built with Streamlit, ChromaDB, and Anthropic Claude
 
         **GitHub Repository:**
-        [github.com/goanpeca/nabari-docs-rag-demo](https://github.com/goanpeca/nabari-docs-rag-demo)
+        [github.com/goanpeca/nebari-docs-rag-demo](https://github.com/goanpeca/nebari-docs-rag-demo)
 
         Built by [@goanpeca](https://www.linkedin.com/in/goanpeca) | © 2026
         """)
@@ -652,18 +668,18 @@ def main() -> None:
         if AUTH_ENABLED:
             st.markdown("---")
             if st.button("Logout", width="stretch"):
-                # Clear cookie (if available)
-                if cookie_manager is not None:
-                    try:
-                        cookie_manager.delete("nebari_auth")
-                    except KeyError:
-                        # Cookie doesn't exist, that's fine
-                        pass
-                # Clear ALL session state to force fresh start
+                # Generate NEW session ID to invalidate old cookie
+                new_session_id = str(uuid.uuid4())
+
+                # Clear ALL session state
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
-                # Set authenticated to False to show login page
+
+                # Set new session ID and unauthenticated state
+                st.session_state.session_id = new_session_id
                 st.session_state.authenticated = False
+
+                # Cookie will be invalid because session ID changed
                 st.rerun()
 
     # Display chat history
