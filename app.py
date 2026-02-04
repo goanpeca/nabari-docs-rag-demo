@@ -659,12 +659,11 @@ def main() -> None:
                     except KeyError:
                         # Cookie doesn't exist, that's fine
                         pass
-                # Clear session
+                # Clear ALL session state to force fresh start
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                # Set authenticated to False to show login page
                 st.session_state.authenticated = False
-                st.session_state.messages = []
-                st.session_state.query_history = []
-                if "agent" in st.session_state:
-                    del st.session_state.agent
                 st.rerun()
 
     # Display chat history
