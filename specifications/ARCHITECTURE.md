@@ -455,14 +455,18 @@ Ensemble ranking
 Combine semantic + lexical matching
 ```
 
-### Phase 4: Streaming Responses (Planned)
+### Phase 4: Streaming Responses (Implemented)
 
 ```
-Enable Claude streaming API
+agent.py: generate_answer_stream() uses client.messages.stream()
     ↓
-Display tokens as they arrive
+Yields text chunks via Generator[str, None, None]
     ↓
-Reduced perceived latency
+app.py: st.write_stream() renders tokens as they arrive
+    ↓
+Post-stream: get_last_stream_metadata() returns tokens, cost, timing
+    ↓
+Reduced perceived latency (no more 2-3s spinner wait)
 ```
 
 ### Phase 5: Agent Tools (Planned)
@@ -477,4 +481,4 @@ Give agent ability to:
 
 ---
 
-_Last updated: 2026-02-02_
+_Last updated: 2026-02-16_

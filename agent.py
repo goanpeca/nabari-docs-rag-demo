@@ -6,6 +6,7 @@ and answer generation using Claude.
 
 import os
 import time
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -305,6 +306,162 @@ class NebariAgent:
                 "query": query,
                 "error": str(e),
             }
+
+    def generate_answer_stream(
+        self,
+        query: str,
+        context: list[dict[str, Any]],
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+    ) -> Generator[str, None, None]:
+        """Generate answer using Claude with streaming, yielding text chunks.
+
+        After this generator is fully consumed, call ``get_last_stream_metadata``
+        to retrieve token usage, cost, timing, and sources.
+
+        Parameters
+        ----------
+        query : str
+            User question
+        context : list of dict
+            Retrieved context chunks
+        temperature : float, default 0.3
+            LLM temperature (0.0-1.0)
+        max_tokens : int, default 2000
+            Maximum tokens in response
+
+        Yields
+        ------
+        str
+            Text chunks as they arrive from the Claude API
+        """
+        context_str = "\n\n".join(
+            [
+                f"[Source: {chunk['metadata'].get('file_path', 'unknown')}]\n{chunk['text']}"
+                for chunk in context
+            ]
+        )
+
+        prompt = SYSTEM_PROMPT.format(context=context_str, question=query)
+
+        sources: list[dict[str, Any]] = []
+        for chunk in context:
+            source_info: dict[str, Any] = {
+                "file_path": chunk["metadata"].get("file_path", "unknown"),
+                "category": chunk["metadata"].get("category", "unknown"),
+                "title": chunk["metadata"].get("title", "unknown"),
+                "heading": chunk["metadata"].get("heading", ""),
+                "relevance": chunk["relevance"],
+            }
+            if source_info not in sources:
+                sources.append(source_info)
+
+        try:
+            llm_start = time.time()
+
+            with self.anthropic.messages.stream(
+                model="claude-sonnet-4-20250514",
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                yield from stream.text_stream
+
+                llm_time = time.time() - llm_start
+                final_message = stream.get_final_message()
+
+            input_tokens = final_message.usage.input_tokens
+            output_tokens = final_message.usage.output_tokens
+            total_tokens = input_tokens + output_tokens
+
+            input_cost = (input_tokens / 1_000_000) * 3.00
+            output_cost = (output_tokens / 1_000_000) * 15.00
+            total_cost = input_cost + output_cost
+
+            self._last_stream_metadata: dict[str, Any] = {
+                "sources": sources,
+                "query": query,
+                "model": "claude-sonnet-4-20250514",
+                "tokens": {
+                    "input": input_tokens,
+                    "output": output_tokens,
+                    "total": total_tokens,
+                },
+                "cost": total_cost,
+                "llm_time": llm_time,
+            }
+
+        except Exception as e:
+            yield f"Error generating answer: {str(e)}"
+            self._last_stream_metadata = {
+                "sources": sources,
+                "query": query,
+                "error": str(e),
+            }
+
+    def get_last_stream_metadata(self) -> dict[str, Any]:
+        """Return metadata from the most recent streaming generation.
+
+        Must be called after the generator from ``generate_answer_stream``
+        has been fully consumed.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionary with sources, tokens, cost, llm_time, etc.
+        """
+        return getattr(self, "_last_stream_metadata", {})
+
+    def answer_question_stream(
+        self,
+        query: str,
+        top_k: int = 5,
+        temperature: float = 0.3,
+        category_filter: str | None = None,
+    ) -> tuple[Generator[str, None, None] | None, dict[str, Any]]:
+        """Answer a question with streaming response.
+
+        Returns a generator for streaming text and a dict with retrieval
+        metadata. After the generator is fully consumed, call
+        ``get_last_stream_metadata`` for token/cost data.
+
+        Parameters
+        ----------
+        query : str
+            User question
+        top_k : int, default 5
+            Number of context chunks to retrieve
+        temperature : float, default 0.3
+            LLM creativity (0.0-1.0)
+        category_filter : str, optional
+            Category filter
+
+        Returns
+        -------
+        tuple[Generator[str, None, None] | None, dict[str, Any]]
+            (text_generator, pre_stream_data). Generator is None if no
+            context found.
+        """
+        total_start = time.time()
+
+        retrieval_start = time.time()
+        context = self.retrieve_context(query=query, top_k=top_k, category_filter=category_filter)
+        retrieval_time = time.time() - retrieval_start
+
+        pre_stream_data: dict[str, Any] = {
+            "query": query,
+            "retrieval_time": retrieval_time,
+            "total_start": total_start,
+        }
+
+        if not context:
+            return None, pre_stream_data
+
+        generator = self.generate_answer_stream(
+            query=query, context=context, temperature=temperature
+        )
+
+        return generator, pre_stream_data
 
     def answer_question(
         self,

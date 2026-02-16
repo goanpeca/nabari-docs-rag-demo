@@ -6,6 +6,7 @@ A RAG-powered chatbot for answering questions about Nebari documentation.
 import hashlib
 import os
 import re
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -773,27 +774,67 @@ def main() -> None:
         with st.chat_message("user"):
             st.markdown(query)
 
-        # Generate response
+        # Generate response with streaming
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                result = st.session_state.agent.answer_question(
+            # Phase 1: Retrieval (fast, show brief spinner)
+            with st.spinner("Searching documentation..."):
+                stream_generator, pre_stream_data = st.session_state.agent.answer_question_stream(
                     query=query,
                     top_k=top_k,
                     temperature=temperature,
                     category_filter=category_filter,
                 )
 
-            # Display answer with embedded images
-            answer_text = result["answer"]
+            # Phase 2: Handle no-context case
+            if stream_generator is None:
+                answer_text = (
+                    "I couldn't find relevant information in the Nebari documentation "
+                    "to answer this question. Please try rephrasing or ask about a "
+                    "different topic."
+                )
+                st.markdown(answer_text)
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": answer_text,
+                        "sources": [],
+                    }
+                )
+                st.rerun()
 
-            # Extract and render images
+            # Phase 3: Stream the answer token-by-token
+            try:
+                answer_text = st.write_stream(stream_generator)
+            except Exception as e:
+                answer_text = f"Error during streaming: {str(e)}"
+                st.error(answer_text)
+
+            if not answer_text or not answer_text.strip():
+                answer_text = "I was unable to generate a response. Please try again."
+                st.markdown(answer_text)
+
+            # Phase 4: Collect post-stream metadata
+            total_time = time.time() - pre_stream_data["total_start"]
+            stream_meta = st.session_state.agent.get_last_stream_metadata()
+
+            result = {
+                "answer": answer_text,
+                **stream_meta,
+                "retrieval_time": pre_stream_data["retrieval_time"],
+                "total_time": total_time,
+            }
+
+            st.session_state.agent.conversation_history.append(
+                {
+                    "query": query,
+                    "answer": answer_text,
+                }
+            )
+
+            # Phase 5: Post-stream rendering (images, metrics, sources)
             image_pattern = r"!\[([^\]]*)\]\((https://[^\)]+\.(?:png|jpg|jpeg|gif|svg))\)"
             images = re.findall(image_pattern, answer_text)
 
-            # Display the text answer
-            st.markdown(answer_text)
-
-            # Render images below the text
             if images:
                 st.markdown("---")
                 for alt_text, img_url in images:
@@ -828,11 +869,12 @@ def main() -> None:
                     st.caption(f"💰 ${metrics['cost']:.4f}")
 
             # Display retrieval quality
+            retrieval_scores = []
             if result.get("sources"):
                 retrieval_scores = [
                     {
                         "title": s.get("title", "Unknown"),
-                        "distance": 1 - s.get("relevance", 0),  # Convert relevance to distance
+                        "distance": 1 - s.get("relevance", 0),
                     }
                     for s in result["sources"]
                 ]
@@ -840,7 +882,6 @@ def main() -> None:
                 with st.expander("🎯 Retrieval Quality", expanded=False):
                     st.caption("Semantic similarity scores (lower = better match)")
                     for score_info in retrieval_scores:
-                        # Color code by relevance
                         if score_info["distance"] < 0.4:
                             icon = "🟢"
                             quality = "High"
@@ -859,9 +900,9 @@ def main() -> None:
                 display_sources(result["sources"])
 
             # Add to chat history
-            message_data = {
+            message_data: dict[str, Any] = {
                 "role": "assistant",
-                "content": result["answer"],
+                "content": answer_text,
                 "sources": result.get("sources", []),
             }
 
